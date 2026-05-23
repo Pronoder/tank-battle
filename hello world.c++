@@ -2,6 +2,8 @@
 // 使用 Win32 GDI 绘制界面，支持动画滚动点名
 // 编译: g++ -o rollcall "hello world.c++" -lgdi32 -mwindows
 
+#define UNICODE
+#define _UNICODE
 #include <windows.h>
 #include <vector>
 #include <cstdlib>
