@@ -1,533 +1,432 @@
-// 可视化随机点名程序 (1-53号)
-// 使用 Win32 GDI 绘制界面，支持动画滚动点名
-// 编译: g++ -o rollcall "hello world.c++" -lgdi32 -mwindows
+// ============================================================
+//  可视化随机点名程序 (1-53号)
+//  纯标准 C++，控制台版本，带 ANSI 颜色和动画效果
+//
+//  编译: g++ "hello world.c++" -o rollcall
+//  运行: ./rollcall    (或双击 rollcall.exe)
+//
+//  操作: [回车] 开始/停止点名  [R] 重置  [Q] 退出
+// ============================================================
 
-#define UNICODE
-#define _UNICODE
-#include <windows.h>
+#include <iostream>
 #include <vector>
 #include <cstdlib>
 #include <ctime>
 #include <string>
-#include <cmath>
+#include <thread>
+#include <chrono>
 
-#define IDT_TIMER1 1
-#define IDT_TIMER2 2
-#define BTN_START  100
-#define BTN_RESET 101
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
-// 全局状态
-HWND g_hWnd;
-HWND g_btnStart, g_btnReset;
-std::vector<int> g_called;       // 已点名列表
-bool g_rolling = false;          // 是否正在滚动
-int  g_currentNum = 1;           // 当前显示的数字
-int  g_resultNum = 0;            // 最终结果
-bool g_showResult = false;       // 是否显示结果
-int  g_rollSpeed = 30;           // 滚动速度(ms)
-int  g_rollCount = 0;            // 滚动计数
-int  g_totalRolls = 0;           // 已滚动的总次数
-int  g_targetRolls = 0;          // 目标滚动次数(随机30~60)
-bool g_highlightCalled[54] = {}; // 已点名的标记
-int  g_particles[20][4] = {};    // 粒子效果: x, y, vx, vy, life
-bool g_particlesActive = false;
+// ============ ANSI 颜色码 ============
+namespace Color {
+    const char* RESET   = "\033[0m";
+    const char* BOLD    = "\033[1m";
+    const char* RED     = "\033[91m";
+    const char* GREEN   = "\033[92m";
+    const char* YELLOW  = "\033[93m";
+    const char* BLUE    = "\033[94m";
+    const char* MAGENTA = "\033[95m";
+    const char* CYAN    = "\033[96m";
+    const char* WHITE   = "\033[97m";
+    const char* GRAY    = "\033[90m";
 
-// 颜色定义
-COLORREF g_bgColor     = RGB(18, 22, 36);
-COLORREF g_cardColor   = RGB(30, 35, 55);
-COLORREF g_accentColor = RGB(0, 200, 255);
-COLORREF g_goldColor   = RGB(255, 200, 0);
-COLORREF g_textColor   = RGB(220, 225, 240);
-COLORREF g_dangerColor = RGB(255, 80, 80);
-
-HFONT g_hFontLarge = NULL;
-HFONT g_hFontMid   = NULL;
-HFONT g_hFontSmall = NULL;
-
-void InitFonts() {
-    g_hFontLarge = CreateFontW(140, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                               ANTIALIASED_QUALITY, FF_MODERN, L"Consolas");
-    g_hFontMid = CreateFontW(36, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                             ANTIALIASED_QUALITY, FF_MODERN, L"Microsoft YaHei");
-    g_hFontSmall = CreateFontW(22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                               ANTIALIASED_QUALITY, FF_MODERN, L"Microsoft YaHei");
+    const char* BG_BLACK   = "\033[40m";
+    const char* BG_RED     = "\033[101m";
+    const char* BG_GREEN   = "\033[42m";
+    const char* BG_YELLOW  = "\033[103m";
+    const char* BG_BLUE    = "\033[44m";
+    const char* BG_CYAN    = "\033[46m";
+    const char* BG_WHITE   = "\033[47m";
+    const char* BG_DEFAULT = "\033[49m";
 }
 
-void SpawnParticles(int cx, int cy) {
-    g_particlesActive = true;
-    for (int i = 0; i < 20; i++) {
-        g_particles[i][0] = cx;
-        g_particles[i][1] = cy;
-        double angle = (rand() % 360) * 3.14159 / 180.0;
-        double speed = 2 + rand() % 6;
-        g_particles[i][2] = (int)(cos(angle) * speed);
-        g_particles[i][3] = (int)(sin(angle) * speed);
-        g_particles[i][4] = 20 + rand() % 25;
+// ============ 全局状态 ============
+std::vector<int> called_list;
+bool  called_map[54] = {};
+int   current_num   = 1;
+int   result_num    = 0;
+bool  is_rolling    = false;
+bool  show_result   = false;
+int   roll_count    = 0;
+int   total_rolls   = 0;
+int   target_rolls  = 0;
+int   roll_delay    = 30;   // 毫秒
+
+// ============ 辅助函数 ============
+
+void enable_ansi() {
+#ifdef _WIN32
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    GetConsoleMode(out, &mode);
+    SetConsoleMode(out, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+#endif
+}
+
+void clear_screen() {
+    std::cout << "\033[2J\033[H";
+}
+
+void set_cursor_visible(bool visible) {
+#ifdef _WIN32
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    CONSOLE_CURSOR_INFO info;
+    GetConsoleCursorInfo(out, &info);
+    info.bVisible = visible;
+    SetConsoleCursorInfo(out, &info);
+#else
+    std::cout << (visible ? "\033[?25h" : "\033[?25l");
+#endif
+}
+
+int get_console_width() {
+#ifdef _WIN32
+    CONSOLE_SCREEN_BUFFER_INFO info;
+    GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &info);
+    return info.srWindow.Right - info.srWindow.Left + 1;
+#else
+    return 80;
+#endif
+}
+
+// 检测键盘输入（非阻塞）
+bool kbhit() {
+#ifdef _WIN32
+    static bool init = false;
+    static HANDLE hin;
+    if (!init) {
+        hin = GetStdHandle(STD_INPUT_HANDLE);
+        SetConsoleMode(hin, ENABLE_PROCESSED_INPUT);
+        init = true;
     }
+    DWORD events;
+    GetNumberOfConsoleInputEvents(hin, &events);
+    if (events > 0) {
+        INPUT_RECORD rec;
+        DWORD read;
+        PeekConsoleInput(hin, &rec, 1, &read);
+        if (read > 0 && rec.EventType == KEY_EVENT && rec.Event.KeyEvent.bKeyDown)
+            return true;
+        // 消耗非按键事件
+        ReadConsoleInput(hin, &rec, 1, &read);
+    }
+    return false;
+#else
+    return false; // Linux/Mac 使用不同的方式
+#endif
 }
 
-void UpdateParticles() {
-    if (!g_particlesActive) return;
-    bool anyAlive = false;
-    for (int i = 0; i < 20; i++) {
-        if (g_particles[i][4] > 0) {
-            g_particles[i][0] += g_particles[i][2];
-            g_particles[i][1] += g_particles[i][3];
-            g_particles[i][3] += 1; // gravity
-            g_particles[i][4]--;
-            anyAlive = true;
+char get_char() {
+#ifdef _WIN32
+    HANDLE hin = GetStdHandle(STD_INPUT_HANDLE);
+    INPUT_RECORD rec;
+    DWORD read;
+    while (true) {
+        ReadConsoleInput(hin, &rec, 1, &read);
+        if (rec.EventType == KEY_EVENT && rec.Event.KeyEvent.bKeyDown)
+            return rec.Event.KeyEvent.uChar.AsciiChar;
+    }
+#else
+    return std::cin.get();
+#endif
+}
+
+std::string center_text(const std::string& text, int width) {
+    int vis_len = 0;
+    bool in_escape = false;
+    for (size_t i = 0; i < text.size(); i++) {
+        if (text[i] == '\033') { in_escape = true; continue; }
+        if (in_escape) {
+            if (text[i] == 'm') in_escape = false;
+            continue;
         }
+        vis_len++;
     }
-    if (!anyAlive) g_particlesActive = false;
+    int pad = (width - vis_len) / 2;
+    if (pad < 0) pad = 0;
+    return std::string(pad, ' ') + text;
 }
 
-void DrawParticles(HDC hdc) {
-    for (int i = 0; i < 20; i++) {
-        if (g_particles[i][4] > 0) {
-            int alpha = (int)(g_particles[i][4] * 255.0 / 25);
-            int r = GetRValue(g_goldColor);
-            int gv = GetGValue(g_goldColor);
-            int b = GetBValue(g_goldColor);
-            HPEN pen = CreatePen(PS_SOLID, 2, RGB(
-                (r * alpha) / 255,
-                (gv * alpha) / 255,
-                (b * alpha) / 255));
-            HPEN oldPen = (HPEN)SelectObject(hdc, pen);
-            int x = g_particles[i][0];
-            int y = g_particles[i][1];
-            MoveToEx(hdc, x - 3, y, NULL);
-            LineTo(hdc, x + 3, y);
-            MoveToEx(hdc, x, y - 3, NULL);
-            LineTo(hdc, x, y + 3);
-            SelectObject(hdc, oldPen);
-            DeleteObject(pen);
+// ============ 绘制 ============
+
+void draw_border(int width, const std::string& color) {
+    std::cout << color;
+    std::cout << "+" << std::string(width - 2, '-') << "+" << std::endl;
+    std::cout << Color::RESET;
+}
+
+void draw_line(int width, const std::string& text, const std::string& color) {
+    std::cout << color << "|";
+    std::cout << center_text(text, width - 2);
+    std::string pad(width - 2 - text.size(), ' ');
+    std::cout << "|" << Color::RESET << std::endl;
+}
+
+void draw_big_number(int num, int width, const std::string& color) {
+    // ASCII 大数字 5x7
+    const char* digits[10][7] = {
+        {" ███ ", "█   █", "█   █", "█   █", "█   █", "█   █", " ███ "}, // 0
+        {"  █  ", " ██  ", "  █  ", "  █  ", "  █  ", "  █  ", " ███ "}, // 1
+        {" ███ ", "█   █", "    █", "   █ ", "  █  ", " █   ", "█████"}, // 2
+        {" ███ ", "█   █", "    █", "  ██ ", "    █", "█   █", " ███ "}, // 3
+        {"█   █", "█   █", "█   █", "█████", "    █", "    █", "    █"}, // 4
+        {"█████", "█    ", "████ ", "    █", "    █", "█   █", " ███ "}, // 5
+        {" ███ ", "█   █", "█    ", "████ ", "█   █", "█   █", " ███ "}, // 6
+        {"█████", "    █", "   █ ", "  █  ", " █   ", "█    ", "█    "}, // 7
+        {" ███ ", "█   █", "█   █", " ███ ", "█   █", "█   █", " ███ "}, // 8
+        {" ███ ", "█   █", "█   █", " ████", "    █", "█   █", " ███ "}  // 9
+    };
+
+    std::string num_str = std::to_string(num);
+    int total_w = (int)num_str.size() * 6 - 1;
+    int pad_left = (width - 2 - total_w) / 2;
+    if (pad_left < 2) pad_left = 2;
+
+    for (int row = 0; row < 7; row++) {
+        std::cout << color << "|" << std::string(pad_left, ' ');
+        for (size_t d = 0; d < num_str.size(); d++) {
+            if (d > 0) std::cout << " ";
+            std::cout << digits[num_str[d] - '0'][row];
         }
+        std::string pad_right(width - 2 - pad_left - total_w, ' ');
+        std::cout << pad_right << "|" << Color::RESET << std::endl;
     }
 }
 
-void DrawRoundedRect(HDC hdc, RECT rc, int radius, COLORREF fill, COLORREF border) {
-    HBRUSH brush = CreateSolidBrush(fill);
-    HPEN pen = CreatePen(PS_SOLID, 2, border);
-    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, brush);
-    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
-    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
-    SelectObject(hdc, oldBrush);
-    SelectObject(hdc, oldPen);
-    DeleteObject(brush);
-    DeleteObject(pen);
-}
-
-void DrawCenteredText(HDC hdc, RECT rc, const wchar_t* text, HFONT font, COLORREF color) {
-    HFONT oldFont = (HFONT)SelectObject(hdc, font);
-    SetTextColor(hdc, color);
-    SetBkMode(hdc, TRANSPARENT);
-    DrawTextW(hdc, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    SelectObject(hdc, oldFont);
-}
-
-void DrawCalledList(HDC hdc, RECT rc) {
-    // 标题区域
-    RECT titleRC = rc;
-    titleRC.bottom = titleRC.top + 45;
-    DrawCenteredText(hdc, titleRC, L"📋 已点名列表", g_hFontMid, g_accentColor);
-
-    // 列表区域
-    int margin = 8;
+void draw_grid(int width) {
     int cols = 10;
-    int cellW = ((rc.right - rc.left) - margin * (cols + 1)) / cols;
-    int cellH = 32;
-    int startY = titleRC.bottom + 10;
+    int grid_w = width - 4;
+    int cell_w = (grid_w - cols - 1) / cols;
+    int total_w = cell_w * cols + (cols - 1);
+    int pad_l = (grid_w - total_w) / 2;
 
-    HFONT oldFont = (HFONT)SelectObject(hdc, g_hFontSmall);
-    SetBkMode(hdc, TRANSPARENT);
+    std::cout << Color::CYAN << Color::BOLD;
+    std::string title = "=== 已点名列表 (" +
+                        std::to_string(called_list.size()) + "/53) ===";
+    std::cout << center_text(title, width) << Color::RESET << std::endl;
+    std::cout << std::endl;
 
-    for (int i = 1; i <= 53; i++) {
-        int row = (i - 1) / cols;
-        int col = (i - 1) % cols;
-        int x = rc.left + margin + col * (cellW + margin);
-        int y = startY + row * (cellH + margin);
+    // 6 行 (1-50) + 1 行 (51-53)
+    for (int row = 0; row < 6; row++) {
+        std::cout << "  " << std::string(pad_l, ' ');
+        for (int col = 0; col < cols; col++) {
+            int num = row * cols + col + 1;
+            if (num > 53) break;
 
-        RECT cellRC = { x, y, x + cellW, y + cellH };
+            if (called_map[num]) {
+                if (num == result_num && show_result) {
+                    std::cout << Color::BG_YELLOW << Color::RED << Color::BOLD;
+                } else {
+                    std::cout << Color::BG_GREEN << Color::WHITE;
+                }
+            } else {
+                std::cout << Color::GRAY;
+            }
 
-        if (g_highlightCalled[i]) {
-            COLORREF bgColor = (i == g_resultNum && g_showResult) ? g_goldColor : RGB(0, 140, 100);
-            COLORREF textColor = (i == g_resultNum && g_showResult) ? RGB(30, 30, 30) : RGB(255, 255, 255);
-            COLORREF borderColor = (i == g_resultNum && g_showResult) ? RGB(255, 220, 60) : RGB(0, 200, 140);
-
-            HBRUSH brush = CreateSolidBrush(bgColor);
-            HPEN pen = CreatePen(PS_SOLID, 2, borderColor);
-            HBRUSH oldBr = (HBRUSH)SelectObject(hdc, brush);
-            HPEN oldP = (HPEN)SelectObject(hdc, pen);
-            RoundRect(hdc, x, y, x + cellW, y + cellH, 6, 6);
-            SelectObject(hdc, oldBr);
-            SelectObject(hdc, oldP);
-            DeleteObject(brush);
-            DeleteObject(pen);
-
-            SetTextColor(hdc, textColor);
-            wchar_t buf[8];
-            wsprintfW(buf, L"%d", i);
-            DrawTextW(hdc, buf, -1, &cellRC, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        } else {
-            // 未点名的灰色格子
-            HBRUSH brush = CreateSolidBrush(RGB(40, 44, 60));
-            HPEN pen = CreatePen(PS_SOLID, 1, RGB(55, 60, 75));
-            HBRUSH oldBr = (HBRUSH)SelectObject(hdc, brush);
-            HPEN oldP = (HPEN)SelectObject(hdc, pen);
-            RoundRect(hdc, x, y, x + cellW, y + cellH, 6, 6);
-            SelectObject(hdc, oldBr);
-            SelectObject(hdc, oldP);
-            DeleteObject(brush);
-            DeleteObject(pen);
-
-            SetTextColor(hdc, RGB(140, 145, 160));
-            wchar_t buf[8];
-            wsprintfW(buf, L"%d", i);
-            DrawTextW(hdc, buf, -1, &cellRC, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            char buf[8];
+            sprintf(buf, "%2d", num);
+            std::cout << " " << buf << " ";
+            std::cout << Color::RESET;
+            if (col < cols - 1 && row * cols + col + 1 < 53)
+                std::cout << " ";
         }
+        std::cout << std::endl;
     }
-
-    SelectObject(hdc, oldFont);
 }
 
-void OnPaint(HWND hwnd) {
-    PAINTSTRUCT ps;
-    HDC hdc = BeginPaint(hwnd, &ps);
-    RECT clientRC;
-    GetClientRect(hwnd, &clientRC);
-
-    // 双缓冲
-    HDC memDC = CreateCompatibleDC(hdc);
-    HBITMAP memBmp = CreateCompatibleBitmap(hdc, clientRC.right, clientRC.bottom);
-    HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
-
-    // 背景
-    HBRUSH bgBrush = CreateSolidBrush(g_bgColor);
-    FillRect(memDC, &clientRC, bgBrush);
-    DeleteObject(bgBrush);
-
-    int w = clientRC.right;
-    int h = clientRC.bottom;
-
-    // === 左侧大数字显示区 ===
-    int leftW = (int)(w * 0.48);
-    RECT mainCard = { 20, 20, leftW - 10, h - 20 };
-    DrawRoundedRect(memDC, mainCard, 20, g_cardColor, RGB(50, 55, 75));
+void draw_ui() {
+    clear_screen();
+    int w = get_console_width();
+    if (w < 60) w = 60;
+    if (w > 100) w = 100;
 
     // 标题
-    RECT titleRC = { mainCard.left, mainCard.top + 20, mainCard.right, mainCard.top + 70 };
-    DrawCenteredText(memDC, titleRC, L"🎯 随机点名", g_hFontMid, g_accentColor);
+    std::cout << std::endl;
+    std::cout << Color::CYAN << Color::BOLD;
+    std::cout << center_text("╔══════════════════════════╗", w) << std::endl;
+    std::cout << center_text("║    🎯 随机点名系统 1-53   ║", w) << std::endl;
+    std::cout << center_text("╚══════════════════════════╝", w) << std::endl;
+    std::cout << Color::RESET;
+    std::cout << std::endl;
 
-    // 数字显示
-    RECT numRC = { mainCard.left, mainCard.top + 90, mainCard.right, mainCard.bottom - 160 };
+    // 主体显示区
+    int card_w = 50;
+    std::string card_color = Color::BLUE;
+    draw_border(card_w, card_color);
 
-    // 光晕效果
-    if (g_showResult) {
-        int cx = (numRC.left + numRC.right) / 2;
-        int cy = (numRC.top + numRC.bottom) / 2;
-        for (int r = 140; r > 30; r -= 15) {
-            int alpha = 20 + (140 - r);
-            COLORREF glow = RGB(
-                (255 * alpha) / 160,
-                (200 * alpha) / 160,
-                (0 * alpha) / 160
-            );
-            if (glow > 0) {
-                HBRUSH glowBrush = CreateSolidBrush(glow);
-                HPEN glowPen = CreatePen(PS_SOLID, 1, glow);
-                HBRUSH oldBr = (HBRUSH)SelectObject(memDC, glowBrush);
-                HPEN oldPn = (HPEN)SelectObject(memDC, glowPen);
-                Ellipse(memDC, cx - r, cy - r, cx + r, cy + r);
-                SelectObject(memDC, oldBr);
-                SelectObject(memDC, oldPn);
-                DeleteObject(glowBrush);
-                DeleteObject(glowPen);
-            }
-        }
+    // 空白行
+    for (int i = 0; i < 2; i++)
+        draw_line(card_w, "", card_color);
+
+    // 大数字
+    int n = show_result ? result_num : current_num;
+    std::string num_color;
+    if (show_result)
+        num_color = std::string(Color::BOLD) + Color::YELLOW;
+    else if (is_rolling)
+        num_color = Color::WHITE;
+    else
+        num_color = Color::WHITE;
+
+    draw_big_number(n, card_w, num_color);
+
+    // 状态行
+    for (int i = 0; i < 1; i++)
+        draw_line(card_w, "", card_color);
+
+    if (is_rolling) {
+        std::string flicker = (roll_count / 3) % 2 ? "▐" : "▌";
+        draw_line(card_w, Color::MAGENTA + std::string("● ") + flicker +
+                  " 点选中... " + flicker, card_color);
+    } else if (show_result) {
+        draw_line(card_w, std::string(Color::BOLD) + Color::YELLOW +
+                  "⭐ 恭喜中选! ⭐", card_color);
+    } else {
+        draw_line(card_w, "按 [回车] 开始点名", card_color);
     }
 
-    // 数字
-    wchar_t numStr[8];
-    wsprintfW(numStr, L"%d", g_showResult ? g_resultNum : g_currentNum);
-    COLORREF numColor = g_showResult ? g_goldColor : g_textColor;
-    DrawCenteredText(memDC, numRC, numStr, g_hFontLarge, numColor);
+    for (int i = 0; i < 1; i++)
+        draw_line(card_w, "", card_color);
 
-    // 滚动时显示 "点选中..."
-    if (g_rolling) {
-        RECT rollingRC = { mainCard.left, mainCard.bottom - 150, mainCard.right, mainCard.bottom - 110 };
-        COLORREF blink = (g_rollCount / 5) % 2 == 0 ? g_accentColor : RGB(255, 150, 0);
-        DrawCenteredText(memDC, rollingRC, L"● 点选中...", g_hFontSmall, blink);
-    }
+    draw_border(card_w, card_color);
 
-    // 结果文字
-    if (g_showResult && !g_rolling) {
-        RECT resultRC = { mainCard.left, mainCard.bottom - 150, mainCard.right, mainCard.bottom - 110 };
-        DrawCenteredText(memDC, resultRC, L"✨ 恭喜中选! ✨", g_hFontMid, g_goldColor);
-    }
+    std::cout << std::endl;
 
-    // 已点名计数
-    RECT countRC = { mainCard.left, mainCard.bottom - 95, mainCard.right, mainCard.bottom - 55 };
-    wchar_t countStr[64];
-    wsprintfW(countStr, L"已点名: %d / 53 人", (int)g_called.size());
-    DrawCenteredText(memDC, countRC, countStr, g_hFontSmall, g_textColor);
+    // 已点名网格
+    draw_grid(w);
 
-    // 粒子
-    DrawParticles(memDC);
-
-    // === 右侧已点名列表 ===
-    RECT rightPanel = { leftW + 10, 20, w - 20, h - 20 };
-    DrawRoundedRect(memDC, rightPanel, 20, g_cardColor, RGB(50, 55, 75));
-    RECT listRC = { rightPanel.left + 15, rightPanel.top + 10, rightPanel.right - 15, rightPanel.bottom - 10 };
-    DrawCalledList(memDC, listRC);
-
-    // 输出
-    BitBlt(hdc, 0, 0, clientRC.right, clientRC.bottom, memDC, 0, 0, SRCCOPY);
-    SelectObject(memDC, oldBmp);
-    DeleteObject(memBmp);
-    DeleteDC(memDC);
-
-    EndPaint(hwnd, &ps);
+    // 底部提示
+    std::cout << std::endl;
+    std::cout << Color::GRAY;
+    std::cout << center_text("[回车] 开始/停止点名  |  [R] 重置  |  [Q] 退出", w);
+    std::cout << Color::RESET << std::endl;
 }
 
-void StartRoll() {
-    if (g_called.size() >= 53) {
-        // 全部点完
-        g_rolling = false;
-        g_showResult = false;
-        MessageBoxW(g_hWnd, L"所有53个号码已全部点完!\n请点击\"重置\"重新开始。",
-                    L"提示", MB_OK | MB_ICONINFORMATION);
+// ============ 点名逻辑 ============
+
+void start_roll() {
+    if (called_list.size() >= 53) {
+        is_rolling = false;
+        show_result = false;
+        draw_ui();
+        std::cout << std::endl;
+        std::cout << Color::RED << Color::BOLD;
+        std::cout << center_text("所有53个号码已全部点完! 按 R 重置", get_console_width());
+        std::cout << Color::RESET << std::endl;
         return;
     }
 
-    g_rolling = true;
-    g_showResult = false;
-    g_resultNum = 0;
-    g_rollCount = 0;
-    g_totalRolls = 0;
-    g_particlesActive = false;
-
-    // 随机目标滚动次数: 30~60次
-    g_targetRolls = 30 + rand() % 31;
-
-    // 初始速度较快
-    g_rollSpeed = 20;
-
-    SetTimer(g_hWnd, IDT_TIMER1, g_rollSpeed, NULL);
-    SetWindowTextW(g_btnStart, L"停止点名");
+    is_rolling  = true;
+    show_result = false;
+    result_num  = 0;
+    roll_count  = 0;
+    total_rolls = 0;
+    roll_delay  = 30;
+    target_rolls = 30 + rand() % 31;
 }
 
-void StopRoll() {
-    KillTimer(g_hWnd, IDT_TIMER1);
-
+void stop_roll() {
     // 从未点名的号码中随机选一个
     std::vector<int> remaining;
     for (int i = 1; i <= 53; i++) {
-        if (!g_highlightCalled[i]) {
+        if (!called_map[i])
             remaining.push_back(i);
-        }
     }
-
     if (remaining.empty()) {
-        g_rolling = false;
+        is_rolling = false;
         return;
     }
 
-    g_resultNum = remaining[rand() % remaining.size()];
-    g_rolling = false;
-    g_showResult = true;
-    g_currentNum = g_resultNum;
-    g_highlightCalled[g_resultNum] = true;
-    g_called.push_back(g_resultNum);
-
-    // 粒子效果
-    RECT rc;
-    GetClientRect(g_hWnd, &rc);
-    int leftW = (int)(rc.right * 0.48);
-    int cx = 20 + (leftW - 10 - 20) / 2;
-    int cy = 90 + (rc.bottom - 20 - 90 - 160) / 2;
-    SpawnParticles(cx, cy);
-    SetTimer(g_hWnd, IDT_TIMER2, 30, NULL);
-
-    SetWindowTextW(g_btnStart, L"开始点名");
-
-    // 如果全部点完
-    if (g_called.size() >= 53) {
-        SetWindowTextW(g_btnStart, L"全部完成");
-        EnableWindow(g_btnStart, FALSE);
-    }
-
-    InvalidateRect(g_hWnd, NULL, TRUE);
+    result_num  = remaining[rand() % remaining.size()];
+    is_rolling  = false;
+    show_result = true;
+    current_num = result_num;
+    called_map[result_num] = true;
+    called_list.push_back(result_num);
 }
 
-void ResetAll() {
-    KillTimer(g_hWnd, IDT_TIMER1);
-    KillTimer(g_hWnd, IDT_TIMER2);
-    g_called.clear();
-    g_rolling = false;
-    g_showResult = false;
-    g_currentNum = 1;
-    g_resultNum = 0;
-    g_particlesActive = false;
-    g_rollCount = 0;
-    for (int i = 0; i < 54; i++) g_highlightCalled[i] = false;
-
-    SetWindowTextW(g_btnStart, L"开始点名");
-    EnableWindow(g_btnStart, TRUE);
-    InvalidateRect(g_hWnd, NULL, TRUE);
+void reset_all() {
+    called_list.clear();
+    for (int i = 0; i < 54; i++) called_map[i] = false;
+    is_rolling  = false;
+    show_result = false;
+    current_num = 1;
+    result_num  = 0;
+    roll_count  = 0;
 }
 
-LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    switch (msg) {
-        case WM_CREATE: {
-            g_hWnd = hwnd;
-            srand((unsigned)time(NULL));
-            InitFonts();
+// ============ 主循环 ============
 
-            // 开始按钮
-            g_btnStart = CreateWindowW(L"BUTTON", L"开始点名",
-                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                20, 0, 180, 50,
-                hwnd, (HMENU)BTN_START,
-                ((LPCREATESTRUCTW)lParam)->hInstance, NULL);
+int main() {
+    srand((unsigned)time(nullptr));
+    enable_ansi();
+    set_cursor_visible(false);
 
-            // 重置按钮
-            g_btnReset = CreateWindowW(L"BUTTON", L"重置",
-                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                220, 0, 100, 50,
-                hwnd, (HMENU)BTN_RESET,
-                ((LPCREATESTRUCTW)lParam)->hInstance, NULL);
-            break;
-        }
+    std::cout << Color::RESET;
+    draw_ui();
 
-        case WM_SIZE: {
-            RECT rc;
-            GetClientRect(hwnd, &rc);
-            int leftW = (int)(rc.right * 0.48);
-            // 按钮放在左下角
-            int btnY = rc.bottom - 50;
-            SetWindowPos(g_btnStart, NULL, 30, btnY, 170, 42, SWP_NOZORDER);
-            SetWindowPos(g_btnReset, NULL, 215, btnY, 90, 42, SWP_NOZORDER);
-            InvalidateRect(hwnd, NULL, TRUE);
-            break;
-        }
+    // 主循环
+    bool running = true;
+    while (running) {
+        // 如果正在滚动
+        if (is_rolling) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(roll_delay));
 
-        case WM_CTLCOLORBTN: {
-            // 按钮样式
-            HDC hdcBtn = (HDC)wParam;
-            SetTextColor(hdcBtn, RGB(255, 255, 255));
-            SetBkColor(hdcBtn, RGB(0, 160, 220));
-            return (LRESULT)CreateSolidBrush(RGB(0, 160, 220));
-        }
+            // 随机选一个未点名的号码
+            std::vector<int> remaining;
+            for (int i = 1; i <= 53; i++)
+                if (!called_map[i]) remaining.push_back(i);
 
-        case WM_COMMAND: {
-            switch (LOWORD(wParam)) {
-                case BTN_START:
-                    if (g_rolling) {
-                        StopRoll();
-                    } else {
-                        StartRoll();
-                    }
-                    break;
-                case BTN_RESET:
-                    ResetAll();
-                    break;
+            if (!remaining.empty())
+                current_num = remaining[rand() % remaining.size()];
+
+            roll_count++;
+            total_rolls++;
+
+            // 逐渐减速
+            if (total_rolls >= target_rolls * 0.6 && roll_delay < 200) {
+                roll_delay += 10;
             }
-            break;
-        }
 
-        case WM_TIMER: {
-            if (wParam == IDT_TIMER1 && g_rolling) {
-                g_totalRolls++;
-
-                // 从未点名的号码中随机选
-                std::vector<int> remaining;
-                for (int i = 1; i <= 53; i++) {
-                    if (!g_highlightCalled[i]) {
-                        remaining.push_back(i);
-                    }
-                }
-                if (!remaining.empty()) {
-                    g_currentNum = remaining[rand() % remaining.size()];
-                }
-
-                g_rollCount++;
-
-                // 逐渐减速
-                if (g_totalRolls >= g_targetRolls * 0.6 && g_rollSpeed < 150) {
-                    g_rollSpeed += 8;
-                    KillTimer(hwnd, IDT_TIMER1);
-                    SetTimer(hwnd, IDT_TIMER1, g_rollSpeed, NULL);
-                }
-
-                // 到达目标次数后停止
-                if (g_totalRolls >= g_targetRolls) {
-                    StopRoll();
-                }
-
-                InvalidateRect(hwnd, NULL, TRUE);
-            } else if (wParam == IDT_TIMER2) {
-                UpdateParticles();
-                if (!g_particlesActive) {
-                    KillTimer(hwnd, IDT_TIMER2);
-                }
-                InvalidateRect(hwnd, NULL, TRUE);
+            // 到达目标次数
+            if (total_rolls >= target_rolls) {
+                stop_roll();
             }
-            break;
+
+            draw_ui();
         }
 
-        case WM_PAINT:
-            OnPaint(hwnd);
-            break;
+        // 检测按键
+        if (kbhit()) {
+            char ch = get_char();
+            if (ch == '\r' || ch == '\n' || ch == ' ') {  // 回车或空格
+                if (is_rolling) {
+                    stop_roll();
+                    draw_ui();
+                } else {
+                    start_roll();
+                    draw_ui();
+                }
+            } else if (ch == 'r' || ch == 'R') {
+                reset_all();
+                draw_ui();
+            } else if (ch == 'q' || ch == 'Q') {
+                running = false;
+            }
+        }
 
-        case WM_DESTROY:
-            KillTimer(hwnd, IDT_TIMER1);
-            KillTimer(hwnd, IDT_TIMER2);
-            if (g_hFontLarge) DeleteObject(g_hFontLarge);
-            if (g_hFontMid) DeleteObject(g_hFontMid);
-            if (g_hFontSmall) DeleteObject(g_hFontSmall);
-            PostQuitMessage(0);
-            break;
-
-        default:
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        // 不滚动时短暂休眠，减少 CPU 占用
+        if (!is_rolling) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        }
     }
+
+    set_cursor_visible(true);
+    clear_screen();
+    std::cout << Color::RESET;
+    std::cout << "已退出随机点名系统。再见!" << std::endl;
     return 0;
-}
-
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
-                   LPSTR lpCmdLine, int nCmdShow) {
-    const wchar_t CLASS_NAME[] = L"RandomRollCallWindow";
-
-    WNDCLASSW wc = {};
-    wc.lpfnWndProc   = WndProc;
-    wc.hInstance     = hInstance;
-    wc.lpszClassName = CLASS_NAME;
-    wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);
-    wc.hbrBackground = CreateSolidBrush(g_bgColor);
-    wc.style         = CS_HREDRAW | CS_VREDRAW;
-    RegisterClassW(&wc);
-
-    HWND hwnd = CreateWindowExW(
-        WS_EX_COMPOSITED,           // 双缓冲减少闪烁
-        CLASS_NAME,
-        L"🎯 随机点名系统 (1-53)",
-        WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME,
-        CW_USEDEFAULT, CW_USEDEFAULT, 1200, 750,
-        NULL, NULL, hInstance, NULL);
-
-    if (!hwnd) return 1;
-
-    ShowWindow(hwnd, nCmdShow);
-    UpdateWindow(hwnd);
-
-    MSG msg = {};
-    while (GetMessageW(&msg, NULL, 0, 0) > 0) {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
-    }
-
-    return (int)msg.wParam;
 }
